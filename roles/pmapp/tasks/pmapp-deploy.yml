@@ -1,0 +1,100 @@
+---
+- name: PM App | find files
+  local_action:
+    module: find
+    path: /tmp
+    patterns: '{{ pm_project_name }}*'
+  register: find_results
+
+- name: PM App | remove any old files from tmp
+  local_action:
+    module: file
+    path: "{{ item.path }}"
+    state: absent
+  with_items:
+    - "{{ find_results.files }}"
+
+- name: PM App | Get Release from s3
+  local_action:
+    module: command aws s3 cp s3://{{ pm_s3_code_repo }}/{{ pm_project_name }}/{{ pm_app_package }} /tmp
+           --profile tsxtrust
+
+- name: PM App | Ensure directory exists
+  local_action:
+    module: file
+    path: "/tmp/{{ pm_project_name }}"
+    state: directory
+
+- name: PM App | unarchive the application
+  local_action:
+    module: unarchive
+    src: "/tmp/{{ pm_app_package }}"
+    dest: "/tmp/{{ pm_project_name }}"
+
+- name: PM App | find jinja templates
+  local_action:
+    module: find
+    paths: "/tmp/{{ pm_app_package | splitext | first }}"
+    patterns: "*.j2"
+    recurse: yes
+  register: templatefileresult
+
+- name: PM App | iterate and send templates
+  local_action:
+    module: template
+    src: "{{ item.path }}"
+    dest: "{{ item.path | dirname }}/{{ item.path | basename | regex_replace('.j2','') }}"
+  with_items: "{{ templatefileresult.files }}"
+
+- name: PM App | archive the application
+  local_action:
+    module: archive
+    path: "/tmp/{{ pm_project_name }}/."
+    dest: "/tmp/{{ pm_app_package }}"
+    format: zip
+
+- name: PM App | Put Release back to s3
+  local_action:
+    module: command aws s3 cp /tmp/{{ pm_app_package }} s3://{{ pm_s3_code_repo }}/{{ pm_project_name }}{{ pm_app_package }}
+           --profile tsxtrust
+
+- name: PM App | Create application version
+  local_action:
+    module: command aws elasticbeanstalk create-application-version
+                --application-name "{{ pm_eb_app_name }}"
+                --version-label "{{ pm_app_version }}"
+                --description "{{ pm_app_version }}"
+                --source-bundle S3Bucket="{{ pm_s3_code_repo }}",S3Key="{{ pm_project_name }}{{ pm_app_package }}"
+                --auto-create-application
+                --profile tsxtrust
+  register: result
+
+- name: PM App | Update Environment
+  local_action:
+    module: command aws elasticbeanstalk update-environment
+                --application-name "{{ pm_eb_app_name }}"
+                --environment-name "{{ pm_app_env }}"
+                --version-label "{{ pm_app_version }}"
+                --profile tsxtrust
+  register: result
+
+- name: PM App | Check Health Status
+  local_action:
+    module: command aws elasticbeanstalk describe-environments
+                --environment-name "{{ pm_app_env }}"
+                --profile tsxtrust
+  register: result
+  until: "(result.stdout | from_json).Environments[0].Health != 'Grey'"
+  failed_when: "(result.stdout | from_json).Environments[0].Health == 'Red'"
+  retries: 30
+  delay: 15
+
+- name: PM App | Check App Deploy Version
+  local_action:
+    module: command aws elasticbeanstalk describe-environments
+                --environment-name "{{ pm_app_env }}"
+                --application-name "{{ pm_eb_app_name }}"
+                --version-label "{{ pm_app_version }}"
+                --profile tsxtrust
+  register: result
+  failed_when: "(result.stdout | from_json).Environments | length == 0"

@@ -1,0 +1,3 @@
+- include: pmapp-deploy.yml
+  tags: ["pmapp", "pmapp:deploy"]
+
